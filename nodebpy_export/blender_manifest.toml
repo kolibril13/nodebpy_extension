@@ -1,0 +1,26 @@
+schema_version = "1.0.0"
+
+id = "nodebpy_export"
+version = "0.1.0"
+name = "Nodes to Code"
+tagline = "Export Blender node trees to nodebpy Python code"
+maintainer = "Jan-Hendrik Müller"
+type = "add-on"
+
+website = "https://github.com/kolibril13/nodebpy_extension"
+
+tags = ["Node", "Import-Export"]
+
+blender_version_min = "5.2.0"
+
+license = [
+    "SPDX:GPL-3.0-or-later",
+]
+copyright = [
+    "2026 nodebpy_extension Contributors",
+]
+
+# "files" — install the nodebpy Python package (and helpers) into the
+# extension's site-packages via pip/uv from the panel's Install button.
+[permissions]
+files = "Install the nodebpy Python package into site-packages"
