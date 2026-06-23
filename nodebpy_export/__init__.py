@@ -10,9 +10,10 @@ trees. The button calls ``nodebpy.export.to_python`` on the open tree; the
 from __future__ import annotations
 
 import bpy
+from bpy.props import PointerProperty
 
 from . import addon_setup
-from .export import NODEBPY_OT_export_to_code, node_tree
+from .export import NODEBPY_OT_export_to_code, NodebpyExportSettings, node_tree
 from .preferences import (
     NODEBPY_OT_install_modules,
     NODEBPY_OT_list_modules,
@@ -40,16 +41,17 @@ class NODEBPY_PT_export(bpy.types.Panel):
         prefs = context.preferences.addons[__package__].preferences
 
         if addon_setup.installer.is_ready():
-            op = layout.operator(
+            layout.operator(
                 NODEBPY_OT_export_to_code.bl_idname,
                 text="Export to Code",
                 icon="CONSOLE",
             )
+            settings = context.scene.nodebpy_export
             col = layout.column(align=True)
-            col.prop(op, "min_chain_length")
-            col.prop(op, "snapshot_positions")
-            col.prop(op, "keep_reroutes")
-            col.prop(op, "strict")
+            col.prop(settings, "min_chain_length")
+            col.prop(settings, "snapshot_positions")
+            col.prop(settings, "keep_reroutes")
+            col.prop(settings, "strict")
         else:
             box = layout.box()
             box.label(text="nodebpy is not installed yet.", icon="ERROR")
@@ -59,6 +61,7 @@ class NODEBPY_PT_export(bpy.types.Panel):
 
 
 _CLASSES = (
+    NodebpyExportSettings,
     NodebpyExportPreferences,
     NODEBPY_OT_export_to_code,
     NODEBPY_OT_install_modules,
@@ -71,9 +74,12 @@ _CLASSES = (
 def register() -> None:
     for cls in _CLASSES:
         bpy.utils.register_class(cls)
+    bpy.types.Scene.nodebpy_export = PointerProperty(type=NodebpyExportSettings)
 
 
 def unregister() -> None:
+    if hasattr(bpy.types.Scene, "nodebpy_export"):
+        del bpy.types.Scene.nodebpy_export
     for cls in reversed(_CLASSES):
         if hasattr(cls, "bl_rna"):
             try:

@@ -1,17 +1,20 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""The Export-to-Code operator.
+"""Export settings + the Export-to-Code operator.
 
-Runs ``nodebpy.export.to_python`` on the node tree open in the editor and
-writes the generated source to a Blender ``Text`` datablock (also copying it to
-the clipboard). ``nodebpy`` is imported lazily inside ``execute`` so the
-extension still registers cleanly before the dependency is installed.
+The tuning options live in a :class:`NodebpyExportSettings` PropertyGroup stored
+on the Scene, so the panel edits real, persistent properties (rather than the
+transient properties of an operator button, which do not reliably hold an edit
+across panel redraws). The operator reads its options from that group.
+
+``nodebpy`` is imported lazily inside ``execute`` so the extension still
+registers cleanly before the dependency is installed.
 """
 
 from __future__ import annotations
 
 import bpy
 from bpy.props import BoolProperty, IntProperty
-from bpy.types import Operator
+from bpy.types import Operator, PropertyGroup
 
 
 def node_tree(context):
@@ -27,13 +30,16 @@ def node_tree(context):
     return getattr(space, "edit_tree", None) or getattr(space, "node_tree", None)
 
 
-class NODEBPY_OT_export_to_code(Operator):
-    """Generate nodebpy Python code that recreates the current node tree"""
+class NodebpyExportSettings(PropertyGroup):
+    """Persistent tuning options for the export, stored on the Scene."""
 
-    bl_idname = "nodebpy_export.to_code"
-    bl_label = "Export to Code"
-    bl_options = {"REGISTER"}
-
+    min_chain_length: IntProperty(
+        name="Min Chain Length",
+        description="Shortest run of nodes emitted as a >> pipeline",
+        default=3,
+        min=2,
+        soft_max=20,
+    )
     snapshot_positions: BoolProperty(
         name="Snapshot Positions",
         description="Capture each node's authored location and restore it on rebuild",
@@ -52,13 +58,14 @@ class NODEBPY_OT_export_to_code(Operator):
         ),
         default=True,
     )
-    min_chain_length: IntProperty(
-        name="Min Chain Length",
-        description="Shortest run of nodes emitted as a >> pipeline",
-        default=3,
-        min=2,
-        soft_max=20,
-    )
+
+
+class NODEBPY_OT_export_to_code(Operator):
+    """Generate nodebpy Python code that recreates the current node tree"""
+
+    bl_idname = "nodebpy_export.to_code"
+    bl_label = "Export to Code"
+    bl_options = {"REGISTER"}
 
     @classmethod
     def poll(cls, context):
@@ -79,13 +86,14 @@ class NODEBPY_OT_export_to_code(Operator):
             )
             return {"CANCELLED"}
 
+        settings = context.scene.nodebpy_export
         try:
             code = to_python(
                 tree,
-                min_chain_length=self.min_chain_length,
-                snapshot_positions=self.snapshot_positions,
-                keep_reroutes=self.keep_reroutes,
-                strict=self.strict,
+                min_chain_length=settings.min_chain_length,
+                snapshot_positions=settings.snapshot_positions,
+                keep_reroutes=settings.keep_reroutes,
+                strict=settings.strict,
             )
         except Exception as exc:  # noqa: BLE001 - surface any failure in the UI
             self.report({"ERROR"}, f"Export failed: {exc}")
