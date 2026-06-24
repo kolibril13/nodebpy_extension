@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "nodebpy_export"
-version = "0.1.1"
+version = "0.1.2"
 name = "Nodes to Code"
 tagline = "Export Blender node trees to nodebpy Python code"
 maintainer = "Jan-Hendrik Müller"
