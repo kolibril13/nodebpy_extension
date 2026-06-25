@@ -14,8 +14,17 @@ registers cleanly before the dependency is installed.
 from __future__ import annotations
 
 import bpy
-from bpy.props import BoolProperty, IntProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty
 from bpy.types import Operator, PropertyGroup
+
+# A node tree's bl_idname -> the group-node bl_idname that references it, so a
+# created tree can be dropped into the open editor as a single group node.
+_GROUP_NODE_IDNAME = {
+    "GeometryNodeTree": "GeometryNodeGroup",
+    "ShaderNodeTree": "ShaderNodeGroup",
+    "CompositorNodeTree": "CompositorNodeGroup",
+    "TextureNodeTree": "TextureNodeGroup",
+}
 
 
 def node_tree(context):
@@ -129,10 +138,39 @@ class NODEBPY_OT_run_code(Operator):
     bl_label = "Run Code"
     bl_options = {"REGISTER", "UNDO"}
 
+    mode: EnumProperty(
+        name="Import As",
+        description="What to do with the tree the code produces",
+        items=(
+            (
+                "TREE",
+                "Tree",
+                "Open the created tree in the editor (and optionally add it as "
+                "a Geometry Nodes modifier)",
+            ),
+            (
+                "GROUP",
+                "Node Group",
+                "Drop the created tree into the open editor as a single group "
+                "node attached to the mouse cursor",
+            ),
+        ),
+        default="TREE",
+        options={"SKIP_SAVE"},
+    )
+
+    # Window-space mouse position captured at invoke, so GROUP mode can drop the
+    # group node under the cursor regardless of which region the click came from.
+    _mouse: tuple[int, int] | None = None
+
     @classmethod
     def poll(cls, context):
         settings = getattr(context.scene, "nodebpy_export", None)
         return settings is not None and bool(settings.code.strip())
+
+    def invoke(self, context, event):
+        self._mouse = (event.mouse_x, event.mouse_y)
+        return self.execute(context)
 
     def execute(self, context):
         code = context.scene.nodebpy_export.code
@@ -148,6 +186,18 @@ class NODEBPY_OT_run_code(Operator):
         if tree is None:
             self.report({"INFO"}, "Ran code from the panel")
             return {"FINISHED"}
+
+        if self.mode == "GROUP":
+            return self._import_as_group(context, tree)
+        return self._import_as_tree(context, tree)
+
+    def _import_as_tree(self, context, tree):
+        # The user is declaring this top-level tree a standalone modifier tree,
+        # so flag it accordingly — otherwise a geometry group built from Python
+        # never appears in the modifier's node-group selector. Nested subgroups
+        # are left untouched (see _created_tree, which returns only the root).
+        if tree.bl_idname == "GeometryNodeTree":
+            tree.is_modifier = True
 
         settings = context.scene.nodebpy_export
         # When applying to an object, leave the editor unpinned so it follows
@@ -168,6 +218,61 @@ class NODEBPY_OT_run_code(Operator):
                     "Couldn't apply — needs a geometry tree and a compatible active object",
                 )
         self.report({"INFO"}, "Ran code — " + ", ".join(parts))
+        return {"FINISHED"}
+
+    def _import_as_group(self, context, tree):
+        """Drop ``tree`` into the open editor as a group node grabbed by the mouse.
+
+        Mirrors how the Add menu inserts a node: place it at the cursor, then
+        hand it to ``node.translate_attach_remove_on_cancel`` so it follows the
+        mouse until the user clicks to drop it (or right-click/Esc to cancel,
+        which removes it).
+        """
+        area = context.area
+        space = context.space_data
+        if space is None or space.type != "NODE_EDITOR" or area is None:
+            self.report({"ERROR"}, "Run with the cursor in a Node Editor to drop a group")
+            return {"CANCELLED"}
+
+        target = getattr(space, "edit_tree", None)
+        group_idname = _GROUP_NODE_IDNAME.get(tree.bl_idname)
+        if target is None or group_idname is None or target.bl_idname != tree.bl_idname:
+            self.report(
+                {"ERROR"},
+                f"Open a {tree.bl_idname} in the editor to drop this group",
+            )
+            return {"CANCELLED"}
+        if target == tree:
+            self.report({"ERROR"}, "Can't drop a group inside itself")
+            return {"CANCELLED"}
+
+        region = next((r for r in area.regions if r.type == "WINDOW"), None)
+        group = target.nodes.new(group_idname)
+        group.node_tree = tree
+
+        if region is not None and self._mouse is not None:
+            # event.mouse_x/y are window-absolute; subtract the region origin to
+            # get region-local coords, then map to view space and undo the UI
+            # scale (node space = view space / ui_scale).
+            view = region.view2d.region_to_view(
+                self._mouse[0] - region.x, self._mouse[1] - region.y
+            )
+            ui_scale = context.preferences.system.ui_scale
+            group.location = (view[0] / ui_scale, view[1] / ui_scale)
+
+        for node in target.nodes:
+            node.select = False
+        group.select = True
+        target.nodes.active = group
+
+        if region is not None:
+            with context.temp_override(area=area, region=region):
+                try:
+                    bpy.ops.node.translate_attach_remove_on_cancel("INVOKE_DEFAULT")
+                except RuntimeError:
+                    pass  # already placed at the cursor; just not grab-attached
+
+        self.report({"INFO"}, f"Dropped '{tree.name}' as a node group")
         return {"FINISHED"}
 
 

@@ -69,11 +69,17 @@ class NODEBPY_PT_export(bpy.types.Panel):
             )
             if context.active_object is not None:
                 layout.prop(settings, "apply_to_object")
-            layout.operator(
+            row = layout.row(align=True)
+            row.operator(
                 NODEBPY_OT_run_code.bl_idname,
-                text="Run Code",
+                text="Run → Tree",
                 icon="PLAY",
-            )
+            ).mode = "TREE"
+            row.operator(
+                NODEBPY_OT_run_code.bl_idname,
+                text="Run → Node Group",
+                icon="NODETREE",
+            ).mode = "GROUP"
         else:
             box = layout.box()
             box.label(text="nodebpy is not installed yet.", icon="ERROR")
