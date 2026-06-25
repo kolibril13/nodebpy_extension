@@ -55,6 +55,7 @@ class NODEBPY_PT_export(bpy.types.Panel):
                 icon="CONSOLE",
             )
             col = layout.column(align=True)
+            col.prop(settings, "selected_tree_only")
             col.prop(settings, "min_chain_length")
             col.prop(settings, "snapshot_positions")
             col.prop(settings, "keep_reroutes")

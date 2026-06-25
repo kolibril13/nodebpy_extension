@@ -40,9 +40,41 @@ def node_tree(context):
     return getattr(space, "edit_tree", None) or getattr(space, "node_tree", None)
 
 
+def selected_node_tree(context):
+    """The node tree referenced by the active selected group node, or ``None``."""
+    tree = node_tree(context)
+    if tree is None:
+        return None
+
+    active = getattr(tree.nodes, "active", None)
+    selected = [node for node in tree.nodes if getattr(node, "select", False)]
+
+    if active in selected:
+        candidate = getattr(active, "node_tree", None)
+        if isinstance(candidate, bpy.types.NodeTree):
+            return candidate
+
+    selected_trees = [
+        candidate
+        for node in selected
+        if isinstance(candidate := getattr(node, "node_tree", None), bpy.types.NodeTree)
+    ]
+    if len(selected_trees) == 1:
+        return selected_trees[0]
+    return None
+
+
 class NodebpyExportSettings(PropertyGroup):
     """Persistent export options and code buffer, stored on the Scene."""
 
+    selected_tree_only: BoolProperty(
+        name="Selected Node Tree Only",
+        description=(
+            "Export the node tree referenced by the active selected group node "
+            "instead of the whole open editor tree"
+        ),
+        default=False,
+    )
     min_chain_length: IntProperty(
         name="Min Chain Length",
         description="Shortest run of nodes emitted as a >> pipeline",
@@ -92,12 +124,23 @@ class NODEBPY_OT_export_to_code(Operator):
 
     @classmethod
     def poll(cls, context):
+        scene = getattr(context, "scene", None)
+        settings = getattr(scene, "nodebpy_export", None) if scene is not None else None
+        if settings is not None and settings.selected_tree_only:
+            return selected_node_tree(context) is not None
         return node_tree(context) is not None
 
     def execute(self, context):
-        tree = node_tree(context)
+        settings = context.scene.nodebpy_export
+        tree = selected_node_tree(context) if settings.selected_tree_only else node_tree(context)
         if tree is None:
-            self.report({"ERROR"}, "No node tree open in the editor")
+            if settings.selected_tree_only:
+                self.report(
+                    {"ERROR"},
+                    "Select a group node with a node tree, or disable Selected Node Tree Only",
+                )
+            else:
+                self.report({"ERROR"}, "No node tree open in the editor")
             return {"CANCELLED"}
 
         try:
@@ -109,7 +152,6 @@ class NODEBPY_OT_export_to_code(Operator):
             )
             return {"CANCELLED"}
 
-        settings = context.scene.nodebpy_export
         try:
             code = to_python(
                 tree,

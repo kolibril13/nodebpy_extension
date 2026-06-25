@@ -21,11 +21,12 @@ See the underlying feature: <https://kolibril13.github.io/nodebpy/nodes-to-code.
 ## Use
 
 With a node tree open in the editor, click **Export to Code**. The generated
-source is written to a Text datablock named `<tree>.py` (visible in Blender's
-Text Editor) and copied to the clipboard.
+source is shown in the side panel and copied to the clipboard.
 
-Options exposed on the button:
+Options in the panel:
 
+- **Selected Node Tree Only** — export the node tree referenced by the active
+  selected group node instead of the whole open tree.
 - **Min Chain Length** — shortest run of nodes emitted as a `>>` pipeline.
 - **Snapshot Positions** — capture and restore each node's authored location.
 - **Keep Reroutes** — preserve reroute nodes instead of collapsing them.
