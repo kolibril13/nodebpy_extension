@@ -13,6 +13,11 @@ registers cleanly before the dependency is installed.
 
 from __future__ import annotations
 
+import ast
+import inspect
+import keyword
+import re
+
 import bpy
 from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty
 from bpy.types import Operator, PropertyGroup
@@ -24,6 +29,12 @@ _GROUP_NODE_IDNAME = {
     "ShaderNodeTree": "ShaderNodeGroup",
     "CompositorNodeTree": "CompositorNodeGroup",
     "TextureNodeTree": "TextureNodeGroup",
+}
+
+_GROUP_BASE_FOR_TREE = {
+    "GeometryNodeTree": "CustomGeometryGroup",
+    "ShaderNodeTree": "CustomShaderGroup",
+    "CompositorNodeTree": "CustomCompositorGroup",
 }
 
 
@@ -153,13 +164,7 @@ class NODEBPY_OT_export_to_code(Operator):
             return {"CANCELLED"}
 
         try:
-            code = to_python(
-                tree,
-                min_chain_length=settings.min_chain_length,
-                snapshot_positions=settings.snapshot_positions,
-                keep_reroutes=settings.keep_reroutes,
-                strict=settings.strict,
-            )
+            code = _export_code(to_python, tree, settings)
         except Exception as exc:  # noqa: BLE001 - surface any failure in the UI
             self.report({"ERROR"}, f"Export failed: {exc}")
             return {"CANCELLED"}
@@ -224,7 +229,11 @@ class NODEBPY_OT_run_code(Operator):
             self.report({"ERROR"}, f"Run failed: {exc}")
             return {"CANCELLED"}
 
-        tree = _created_tree(namespace, before)
+        try:
+            tree = _created_tree(namespace, before)
+        except Exception as exc:  # noqa: BLE001 - group class creation can fail
+            self.report({"ERROR"}, f"Run failed: {exc}")
+            return {"CANCELLED"}
         if tree is None:
             self.report({"INFO"}, "Ran code from the panel")
             return {"FINISHED"}
@@ -291,6 +300,10 @@ class NODEBPY_OT_run_code(Operator):
         region = next((r for r in area.regions if r.type == "WINDOW"), None)
         group = target.nodes.new(group_idname)
         group.node_tree = tree
+        try:
+            group.show_options = False
+        except (AttributeError, TypeError):
+            pass
 
         if region is not None and self._mouse is not None:
             # event.mouse_x/y are window-absolute; subtract the region origin to
@@ -318,6 +331,120 @@ class NODEBPY_OT_run_code(Operator):
         return {"FINISHED"}
 
 
+def _export_code(to_python, tree, settings) -> str:
+    kwargs = {
+        "min_chain_length": settings.min_chain_length,
+        "snapshot_positions": settings.snapshot_positions,
+        "keep_reroutes": settings.keep_reroutes,
+        "strict": settings.strict,
+    }
+    if not settings.selected_tree_only:
+        return to_python(tree, **kwargs)
+
+    try:
+        params = inspect.signature(to_python).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "top_level" in params:
+        return to_python(tree, **kwargs, top_level="class")
+
+    code = to_python(tree, **kwargs)
+    return _tree_builder_code_to_group_class(code, tree)
+
+
+def _tree_builder_code_to_group_class(code: str, tree) -> str:
+    """Fallback for older nodebpy versions without ``top_level="class"``."""
+    base = _GROUP_BASE_FOR_TREE.get(tree.bl_idname)
+    if base is None:
+        return code
+
+    module = ast.parse(code)
+    with_node = next(
+        (
+            node
+            for node in module.body
+            if isinstance(node, ast.With) and _binds_tree_var(node)
+        ),
+        None,
+    )
+    if with_node is None or with_node.end_lineno is None:
+        raise ValueError("Selected tree export needs a top-level TreeBuilder block")
+
+    lines = code.splitlines()
+    prefix = lines[: with_node.lineno - 1]
+    body = lines[with_node.lineno : with_node.end_lineno]
+    suffix = lines[with_node.end_lineno :]
+
+    snapshot, suffix = _take_snapshot_block(suffix)
+    class_lines = _group_class_lines(tree, base, body, snapshot)
+    result = _ensure_group_base_import(prefix + class_lines + suffix, base)
+    return "\n".join(result)
+
+
+def _binds_tree_var(node: ast.With) -> bool:
+    return any(
+        isinstance(item.optional_vars, ast.Name) and item.optional_vars.id == "tree"
+        for item in node.items
+    )
+
+
+def _take_snapshot_block(lines: list[str]) -> tuple[list[str], list[str]]:
+    index = 0
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    if index < len(lines) and lines[index].startswith("# Restore authored"):
+        return lines[index:], lines[: index]
+    return [], lines
+
+
+def _group_class_lines(
+    tree, base: str, body_lines: list[str], snapshot_lines: list[str]
+) -> list[str]:
+    header = [
+        f"class {_class_name(tree.name)}({base}):",
+        f"    _name = {tree.name!r}",
+    ]
+    color = getattr(tree, "color_tag", "NONE")
+    if color and color != "NONE":
+        header.append(f"    _color_tag = {color!r}")
+    header.extend(["", "    def _build_group(self, tree):"])
+
+    body = [("    " + line) if line else "" for line in body_lines]
+    if not body:
+        body = ["        pass"]
+    if snapshot_lines:
+        body.extend(
+            [""] + [("        " + line) if line else "" for line in snapshot_lines]
+        )
+    return ["", ""] + header + body
+
+
+def _ensure_group_base_import(lines: list[str], base: str) -> list[str]:
+    import_line = f"from nodebpy.builder import {base}"
+    if any(
+        line.startswith("from nodebpy.builder import") and base in line
+        for line in lines
+    ):
+        return lines
+
+    insert_at = 0
+    while insert_at < len(lines) and (
+        lines[insert_at].startswith("import ")
+        or lines[insert_at].startswith("from ")
+    ):
+        insert_at += 1
+    return lines[:insert_at] + [import_line] + lines[insert_at:]
+
+
+def _class_name(name: str) -> str:
+    cleaned = "".join(p[:1].upper() + p[1:] for p in re.split(r"\W+", name) if p)
+    if not cleaned or cleaned[0].isdigit():
+        cleaned = f"Group{cleaned}"
+    if keyword.iskeyword(cleaned):
+        cleaned += "_"
+    return cleaned
+
+
 def _created_tree(namespace: dict, before: set[str]):
     """The node tree a Run produced, or ``None``.
 
@@ -329,10 +456,12 @@ def _created_tree(namespace: dict, before: set[str]):
     candidate = getattr(builder, "tree", None)
     if isinstance(candidate, bpy.types.NodeTree):
         return candidate
+    if isinstance(builder, bpy.types.NodeTree):
+        return builder
 
     new_groups = [g for g in bpy.data.node_groups if g.name not in before]
     if not new_groups:
-        return None
+        return _created_group_class_tree(namespace)
     nested = {
         sub.name
         for g in new_groups
@@ -341,6 +470,23 @@ def _created_tree(namespace: dict, before: set[str]):
     }
     top_level = [g for g in new_groups if g.name not in nested]
     return (top_level or new_groups)[-1]
+
+
+def _created_group_class_tree(namespace: dict):
+    module_name = namespace.get("__name__")
+    for value in reversed(list(namespace.values())):
+        if not isinstance(value, type):
+            continue
+        if getattr(value, "__module__", None) != module_name:
+            continue
+        if not callable(getattr(value, "create_group", None)):
+            continue
+        if not getattr(value, "_tree_idname", None) or not getattr(value, "_name", None):
+            continue
+        tree = value.create_group()
+        if isinstance(tree, bpy.types.NodeTree):
+            return tree
+    return None
 
 
 def _apply_to_object(context, tree):

@@ -26,7 +26,8 @@ source is shown in the side panel and copied to the clipboard.
 Options in the panel:
 
 - **Selected Node Tree Only** — export the node tree referenced by the active
-  selected group node instead of the whole open tree.
+  selected group node as a reusable `Custom*Group` instead of the whole open
+  tree.
 - **Min Chain Length** — shortest run of nodes emitted as a `>>` pipeline.
 - **Snapshot Positions** — capture and restore each node's authored location.
 - **Keep Reroutes** — preserve reroute nodes instead of collapsing them.
@@ -51,7 +52,14 @@ From a checkout, with a recent Blender on your PATH:
 blender --command extension build --source-dir nodebpy_export
 ```
 
-This produces a `nodebpy_export-0.1.0.zip` ready to install or upload.
+This produces a `nodebpy_export-<version>.zip` ready to install or upload.
+
+## Releasing
+
+Releases are created by pushing a `v*` tag. Bump
+`nodebpy_export/blender_manifest.toml`, commit the change, then push the tag;
+GitHub Actions validates, builds, uploads the zip asset, and triggers the
+website rebuild hook when configured.
 
 ## Requirements
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Nodebpy Extension Release"
+  short_description: "Release and blog context for nodebpy_extension"
+  default_prompt: "Use $nodebpy-extension-release to prepare a nodebpy_extension release and update the blog link."
