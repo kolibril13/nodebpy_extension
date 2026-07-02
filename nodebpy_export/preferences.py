@@ -27,6 +27,39 @@ def _lines_append(line: str) -> None:
     _LINES.append(line)
 
 
+def _tag_redraw_panels() -> None:
+    """Tag the panels hosting ``draw_dependencies`` for redraw: the Node
+    Editor sidebar and the addon preferences window. Main thread only."""
+    for wm in bpy.data.window_managers:
+        for window in wm.windows:
+            for area in window.screen.areas:
+                if area.type == "NODE_EDITOR":
+                    for region in area.regions:
+                        if region.type == "UI":
+                            region.tag_redraw()
+                elif area.type == "PREFERENCES":
+                    area.tag_redraw()
+    return None
+
+
+def _request_redraw(*_args) -> None:
+    """Thread-safe redraw request for the installer callbacks.
+
+    Worker threads must not call region.tag_redraw() directly: tagging
+    doesn't wake Blender's event loop, so with an idle UI the update (log
+    lines, the final "Done" state) only renders on the next input event —
+    completion appears to take seconds until the mouse moves. Registering
+    a timer is thread-safe, wakes the event loop immediately, and runs the
+    tagging on the main thread. is_registered coalesces bursts of log
+    lines into a single pending redraw.
+    """
+    try:
+        if not bpy.app.timers.is_registered(_tag_redraw_panels):
+            bpy.app.timers.register(_tag_redraw_panels, first_interval=0.0)
+    except ValueError:
+        pass  # lost a register race with another worker thread — fine
+
+
 # ============================================================ #
 # Operators                                                    #
 # ============================================================ #
@@ -43,10 +76,9 @@ class NODEBPY_OT_install_modules(bpy.types.Operator):
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         _LINES.clear()
-        region = context.region
         addon_setup.installer.install_python_modules(
-            line_callback=lambda line: _lines_append(line) or region.tag_redraw(),
-            finally_callback=lambda e: region.tag_redraw(),
+            line_callback=lambda line: _lines_append(line) or _request_redraw(),
+            finally_callback=_request_redraw,
         )
         return {"FINISHED"}
 
@@ -64,10 +96,9 @@ class NODEBPY_OT_uninstall_modules(bpy.types.Operator):
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         _LINES.clear()
-        region = context.region
         addon_setup.installer.uninstall_python_modules(
-            line_callback=lambda line: _lines_append(line) or region.tag_redraw(),
-            finally_callback=lambda e: region.tag_redraw(),
+            line_callback=lambda line: _lines_append(line) or _request_redraw(),
+            finally_callback=_request_redraw,
         )
         return {"FINISHED"}
 
@@ -85,10 +116,9 @@ class NODEBPY_OT_list_modules(bpy.types.Operator):
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         _LINES.clear()
-        region = context.region
         addon_setup.installer.list_python_modules(
-            line_callback=lambda line: _lines_append(line) or region.tag_redraw(),
-            finally_callback=lambda e: region.tag_redraw(),
+            line_callback=lambda line: _lines_append(line) or _request_redraw(),
+            finally_callback=_request_redraw,
         )
         return {"FINISHED"}
 
@@ -115,10 +145,11 @@ def draw_dependencies(
     install_row = body.row()
     install_row.scale_y = 1.4
     install_row.alert = not all_installed  # the "cool red button" when missing
+    install_row.enabled = not all_installed
     install_row.operator(
         NODEBPY_OT_install_modules.bl_idname,
         icon="IMPORT",
-        text="Install nodebpy" if not all_installed else "Reinstall nodebpy",
+        text="Install nodebpy",
     )
 
     body.label(text="Required Python Modules:")
