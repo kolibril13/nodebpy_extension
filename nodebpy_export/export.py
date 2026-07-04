@@ -221,19 +221,28 @@ class NODEBPY_OT_run_code(Operator):
 
     def execute(self, context):
         code = context.scene.nodebpy_export.code
+        # nodebpy's create_group() reuses an existing node group of the same
+        # _name instead of rebuilding it, so rerunning edited class-form code
+        # would silently hand back the previous build. Rename those groups out
+        # of the way so this run builds fresh trees, then remap the old trees'
+        # users onto the rebuilt ones below.
+        stashed = _stash_conflicting_groups(code)
         before = {group.name for group in bpy.data.node_groups}
         namespace: dict = {"__name__": "__nodebpy_panel__"}
         try:
             exec(compile(code, "<nodebpy panel>", "exec"), namespace)  # noqa: S102
         except Exception as exc:  # noqa: BLE001 - surface any failure in the UI
+            _restore_stashed_groups(stashed)
             self.report({"ERROR"}, f"Run failed: {exc}")
             return {"CANCELLED"}
 
         try:
             tree = _created_tree(namespace, before)
         except Exception as exc:  # noqa: BLE001 - group class creation can fail
+            _restore_stashed_groups(stashed)
             self.report({"ERROR"}, f"Run failed: {exc}")
             return {"CANCELLED"}
+        _replace_stashed_groups(stashed)
         if tree is None:
             self.report({"INFO"}, "Ran code from the panel")
             return {"FINISHED"}
@@ -443,6 +452,78 @@ def _class_name(name: str) -> str:
     if keyword.iskeyword(cleaned):
         cleaned += "_"
     return cleaned
+
+
+def _stash_conflicting_groups(code: str) -> dict[str, bpy.types.NodeTree]:
+    """Rename existing node groups whose names ``code``'s group classes claim.
+
+    Returns ``original name -> renamed old tree``. With the old trees out of
+    the way, every ``create_group()`` call the run triggers (top-level classes
+    and nested subgroups alike) builds from the current code instead of
+    reusing a build from an earlier run.
+    """
+    stashed: dict[str, bpy.types.NodeTree] = {}
+    try:
+        module = ast.parse(code)
+    except SyntaxError:
+        return stashed  # let exec() report the error
+    for node in ast.walk(module):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        name = _class_group_name(node)
+        if name is None or name in stashed:
+            continue
+        existing = bpy.data.node_groups.get(name)
+        if existing is not None:
+            existing.name = name + ".stale"
+            stashed[name] = existing
+    return stashed
+
+
+def _class_group_name(class_def: ast.ClassDef) -> str | None:
+    """The literal ``_name`` a group class body assigns, or ``None``."""
+    for stmt in class_def.body:
+        if isinstance(stmt, ast.Assign):
+            targets, value = stmt.targets, stmt.value
+        elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+            targets, value = [stmt.target], stmt.value
+        else:
+            continue
+        for target in targets:
+            if (
+                isinstance(target, ast.Name)
+                and target.id == "_name"
+                and isinstance(value, ast.Constant)
+                and isinstance(value.value, str)
+            ):
+                return value.value
+    return None
+
+
+def _restore_stashed_groups(stashed: dict[str, bpy.types.NodeTree]) -> None:
+    """Failure path: put the old trees back under their original names."""
+    for name, old in stashed.items():
+        leftover = bpy.data.node_groups.get(name)
+        if leftover is not None and leftover != old:
+            bpy.data.node_groups.remove(leftover)  # partial build of failed run
+        old.name = name
+
+
+def _replace_stashed_groups(stashed: dict[str, bpy.types.NodeTree]) -> None:
+    """Point users of each stashed old tree at its rebuilt successor.
+
+    Group nodes, modifiers and pinned editors that referenced the old build
+    switch to the new one, and the old tree is removed. When the run didn't
+    recreate a group under that name (class renamed or removed from the code),
+    the old tree keeps its original name instead.
+    """
+    for name, old in stashed.items():
+        new = bpy.data.node_groups.get(name)
+        if new is not None and new != old and new.bl_idname == old.bl_idname:
+            old.user_remap(new)
+            bpy.data.node_groups.remove(old)
+        else:
+            old.name = name
 
 
 def _created_tree(namespace: dict, before: set[str]):
