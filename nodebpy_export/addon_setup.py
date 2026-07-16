@@ -158,7 +158,13 @@ class Installer(Executor):
         self._modules_cache: Optional[dict[str, bool]] = None
 
     def get_required_modules(self) -> dict[str, bool]:
-        """Map each required module name to whether it is importable.
+        """Map each required module name to whether it is installed in the
+        managed site-packages.
+
+        Scoped to the managed site-packages, not all of ``sys.path``: a copy
+        installed elsewhere (e.g. Blender's bundled site-packages) would
+        otherwise make a dependency look installed, so Install would skip it
+        and the stale copy would keep being imported.
 
         Cached: the sidebar panel calls this on every redraw, and probing
         the filesystem per redraw makes the whole UI sticky once
@@ -170,8 +176,12 @@ class Installer(Executor):
         """
         if self._modules_cache is None:
             importlib.invalidate_caches()
+            site_packages_path = self._site_packages_path()
+            search_path = [site_packages_path] if site_packages_path else None
             self._modules_cache = {
-                dist: importlib.machinery.PathFinder.find_spec(dist)
+                dist: importlib.machinery.PathFinder.find_spec(
+                    dist, path=search_path
+                )
                 is not None
                 for dist in self.dependencies
             }
@@ -308,7 +318,13 @@ class Installer(Executor):
         packages: list[str],
         target_option: list[str],
     ) -> list[list[str]]:
-        """Command chain to install ``packages`` (uv when usable, else pip)."""
+        """Command chain to install ``packages`` (uv when usable, else pip).
+
+        ``--upgrade`` on both paths so Install also moves an existing
+        install to the latest release instead of auditing it as already
+        satisfied. For pip it is required anyway: pip refuses to replace
+        package directories that already exist under ``--target`` without it.
+        """
         uv = self._uv_command()
         if uv is not None:
             return [
@@ -316,6 +332,7 @@ class Installer(Executor):
                     *uv,
                     "pip",
                     "install",
+                    "--upgrade",
                     "--python",
                     sys.executable,
                     *target_option,
@@ -332,6 +349,7 @@ class Installer(Executor):
                 "-m",
                 "pip",
                 "install",
+                "--upgrade",
                 *target_option,
                 "--disable-pip-version-check",
                 "--no-input",
@@ -339,6 +357,40 @@ class Installer(Executor):
             ]
         )
         return commands
+
+    def _warn_shadowing_copies(
+        self,
+        site_packages_path: Optional[str],
+        line_callback: Optional[Callable[[str], None]],
+    ) -> None:
+        """Report copies of our dependencies installed outside the managed
+        site-packages (e.g. Blender's bundled one).
+
+        Those copies are not touched by install/uninstall here, but they
+        keep the modules importable — so a stale version can silently be
+        used whenever the managed dir has no copy. Not removed
+        automatically: other add-ons may rely on them.
+        """
+        wanted = {self._canonical(d) for d in self.dependencies}
+        other_paths = [
+            p
+            for p in sys.path
+            if p.endswith("site-packages")
+            and p != site_packages_path
+            and os.path.isdir(p)
+        ]
+        for path in other_paths:
+            for dist in importlib.metadata.distributions(path=[path]):
+                name = dist.metadata["Name"]
+                if not name or self._canonical(name) not in wanted:
+                    continue
+                _invoke_callback(
+                    line_callback,
+                    f"Warning: {name} {dist.version} is also installed in "
+                    f"{path} (not managed by this extension) and may shadow "
+                    f"the managed copy. Remove it with: "
+                    f"{sys.executable} -m pip uninstall {name}",
+                )
 
     def install_python_modules(
         self,
@@ -355,10 +407,11 @@ class Installer(Executor):
         ]
         if not missing:
             # Nothing missing — reinstall the full set so the log box still
-            # gives feedback.
+            # gives feedback (and --upgrade moves it to the latest release).
             missing = list(self.dependencies)
 
         _invoke_callback(line_callback, self._describe_installer())
+        self._warn_shadowing_copies(site_packages_path, line_callback)
         self._run_command_chain(
             self._install_commands(missing, target_option),
             self._subprocess_env(site_packages_path),
@@ -473,6 +526,7 @@ class Installer(Executor):
         finally_callback: Optional[Callable[["Executor"], Any]] = None,
     ) -> None:
         site_packages_path = self._site_packages_path()
+        self._warn_shadowing_copies(site_packages_path, line_callback)
         packages = self._target_removal_set(site_packages_path)
         if not packages:
             _invoke_callback(line_callback, "No installed dependencies to remove.")
@@ -509,12 +563,15 @@ class Installer(Executor):
         line_callback: Optional[Callable[[str], None]] = None,
         finally_callback: Optional[Callable[["Executor"], Any]] = None,
     ) -> None:
+        # PYTHONPATH via _subprocess_env so the listing includes the managed
+        # site-packages — a bare `pip list` only sees Blender's bundled one.
         self.exec_command(
             sys.executable,
             "-m",
             "pip",
             "list",
             "-v",
+            env=self._subprocess_env(self._site_packages_path()),
             line_callback=line_callback,
             finally_callback=finally_callback,
         )
